@@ -10,10 +10,31 @@ import {
   LinearProgress,
   Typography,
   Snackbar,
-  Alert
+  Alert,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  IconButton,
+  Tooltip,
+  Chip,
+  TextField
 } from '@mui/material';
-import CloudUploadIcon from '@mui/icons-material/CloudUpload';
-import DownloadIcon from '@mui/icons-material/Download';
+import {
+  CloudUpload as CloudUploadIcon,
+  Download as DownloadIcon,
+  Close as CloseIcon,
+  Visibility as VisibilityIcon,
+  Search as SearchIcon,
+  Refresh as RefreshIcon
+} from '@mui/icons-material';
 import { styled } from '@mui/material/styles';
 import * as XLSX from 'xlsx';
 
@@ -31,6 +52,8 @@ const VisuallyHiddenInput = styled('input')({
 
 export default function Products() {
   const [products, setProducts] = useState([]);
+  const [filteredProducts, setFilteredProducts] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [importCount, setImportCount] = useState(0);
@@ -41,16 +64,78 @@ export default function Products() {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState('');
   const [snackbarSeverity, setSnackbarSeverity] = useState('success');
+  const [error, setError] = useState(null);
+  const [openVariantsDialog, setOpenVariantsDialog] = useState(false);
+  const [currentProduct, setCurrentProduct] = useState(null);
+  const [importedProducts, setImportedProducts] = useState([]);
+  const [importErrors, setImportErrors] = useState([]);
+  const [showImportSummary, setShowImportSummary] = useState(false);
 
-  const showSnackbar = (message, severity = 'success') => {
-    setSnackbarMessage(message);
-    setSnackbarSeverity(severity);
-    setSnackbarOpen(true);
+  function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+      const cookies = document.cookie.split(';');
+      for (let cookie of cookies) {
+        cookie = cookie.trim();
+        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+          cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+          break;
+        }
+      }
+    }
+    return cookieValue;
+  }
+
+  let csrfToken = null;
+  if (typeof window !== 'undefined') {
+    csrfToken = getCookie('csrftoken');
+  }
+
+  // Fetch products on component mount and when refresh is needed
+  const fetchProducts = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('http://127.0.0.1:8000/pos/product/get', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setProducts(data.products || []);
+      setFilteredProducts(data.products || []);
+    } catch (err) {
+      setError(err.message);
+      showSnackbar(`Failed to fetch products: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleCloseSnackbar = () => {
-    setSnackbarOpen(false);
-  };
+  useEffect(() => {
+    fetchProducts();
+  }, []);
+
+  // Filter products based on search term
+  useEffect(() => {
+    if (searchTerm.trim() === '') {
+      setFilteredProducts(products);
+    } else {
+      const filtered = products.filter(product =>
+        product.code?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        product.designation?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        product.category_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        product.brand?.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+      setFilteredProducts(filtered);
+    }
+  }, [searchTerm, products]);
 
   const handleFileImport = async (event) => {
     const file = event.target.files[0];
@@ -63,6 +148,9 @@ export default function Products() {
     setImportCount(0);
     setImportedVariantsCount(0);
     setProgress(0);
+    setImportedProducts([]);
+    setImportErrors([]);
+    setShowImportSummary(false);
 
     try {
       // Validate file type
@@ -152,75 +240,72 @@ export default function Products() {
             throw new Error('Aucune donnée valide trouvée dans le fichier');
           }
 
-          // Process data
-          setImportStatus('Traitement des produits...');
-          const productGroups = {};
-          const missingRefs = [];
+          // Process data line by line
+          setImportStatus('Préparation des données...');
+          const productsToImport = results.data.map((row, index) => {
+            const parseNumber = (value, fieldName, required = false, defaultValue = 0) => {
+              if (value === null || value === undefined || value === '') {
+                if (required) throw new Error(`Missing required field ${fieldName} at row ${index + 2}`);
+                return defaultValue;
+              }
+              const cleanedValue = String(value).replace(',', '.').trim();
+              const parsed = parseFloat(cleanedValue);
+              if (isNaN(parsed)) throw new Error(`Invalid ${fieldName} at row ${index + 2}: ${value}`);
+              return parsed;
+            };
 
-          results.data.forEach((row, index) => {
-            const productReference = (row.REFERENCE || '').toString().trim();
-            const productName = (row.PRODUCTNAME || '').toString().trim();
-            const groupKey = productReference || productName;
+            const prixHT = parseNumber(row.SELLPRICETAXEXCLUDE, 'SELLPRICETAXEXCLUDE', true);
+            const taxe = parseNumber(row.VAT, 'VAT', true);
+            const prixTTC = parseNumber(row.SELLPRICETAXINCLUDE, 'SELLPRICETAXINCLUDE', false);
+            const costPrice = parseNumber(row.COSTPRICE, 'COSTPRICE', false);
+            const isSimple = String(row.SIMPLEPRODUCT || '').trim().toLowerCase();
+            const hasVariants = isSimple === 'false';
 
-            if (!groupKey) {
-              missingRefs.push(`Ligne ${index + 2}: Reference et ProductName manquants`);
-              return;
-            }
-
-            if (!productGroups[groupKey]) {
-              productGroups[groupKey] = [];
-            }
-            productGroups[groupKey].push(row);
-          });
-
-          if (missingRefs.length > 0) {
-            console.warn('Lignes ignorées:', missingRefs);
-          }
-
-          // Transform to import format
-          const productsToImport = Object.values(productGroups).map(group => {
-            const firstRow = group[0];
-            const hasVariants = group.length > 1 ||
-              (firstRow.SIMPLEPRODUCT &&
-                firstRow.SIMPLEPRODUCT.toString().toUpperCase() === 'FALSE');
-
-            // Base product
-            const productData = {
-              code: (firstRow.REFERENCE || '').toString().trim(),
-              designation: (firstRow.PRODUCTNAME || '').toString().trim(),
-              category_name: (firstRow.CATEGORY || 'Default').toString().trim(),
-              brand: (firstRow.BRAND || '').toString().trim(),
-              description: (firstRow.DESCRIPTION || '').toString(),
-              cost_price: parseFloat(firstRow.COSTPRICE) || 0,
-              prixHT: parseFloat(firstRow.SELLPRICETAXEXCLUDE) || 0,
-              taxe: parseFloat(firstRow.VAT) || 0,
-              prixTTC: parseFloat(firstRow.SELLPRICETAXINCLUDE) || 0,
-              sellable: firstRow.SELLABLE &&
-                firstRow.SELLABLE.toString().toUpperCase() === 'TRUE',
+            const product = {
+              code: (row.REFERENCE || '').toString().trim() || null,
+              designation: (row.PRODUCTNAME || '').toString().trim(),
+              category_name: (row.CATEGORY || 'Default').toString().trim(),
+              brand: (row.BRAND || '').toString().trim() || null,
+              description: (row.DESCRIPTION || '').toString() || null,
+              cost_price: costPrice,
+              prix_ht: prixHT,
+              taxe: taxe,
+              prix_ttc: prixTTC,
+              stock: hasVariants ? 0 : parseInt(row.QUANTITY) || 0,
+              marge: parseNumber(row.MARGE, 'MARGE', false, 0),
+              remise_max: parseNumber(row.REMISE_MAX, 'REMISE_MAX', false),
+              remise_valeur_max: parseNumber(row.REMISE_VALEUR_MAX, 'REMISE_VALEUR_MAX', false),
+              sellable: String(row.SELLABLE || '').trim().toLowerCase() === 'true',
               has_variants: hasVariants,
+              status: (row.STATUS || 'in_stock').toString().trim(),
+              image_path: (row.IMAGE || '').toString().trim() || null,
+              sub_category_name: (row.SUB_CATEGORY || '').toString().trim() || null,
+              is_deleted: false,
+              date_expiration: row.DATE_EXPIRE || null,
+              rowNumber: index + 2,
               variants: []
             };
 
-            // Handle variants
             if (hasVariants) {
-              productData.variants = group.map(variantRow => ({
-                combination_name: (variantRow.VARIANTNAME || '').toString().trim(),
-                price_impact: parseFloat(variantRow.IMPACTPRICE) || 0,
-                stock: parseInt(variantRow.QUANTITYVARIANT) || 0,
-                default_variant: variantRow.DEFAULTVARIANT &&
-                  variantRow.DEFAULTVARIANT.toString().toUpperCase() === 'TRUE',
-                attributes: parseAttributes(variantRow.VARIANTNAME)
-              }));
-            } else {
-              // Simple product
-              productData.stock = parseInt(firstRow.QUANTITY) || 0;
+              const variantPrice = parseNumber(row.PRICE, 'PRICE', true);
+              const variantPriceImpact = parseNumber(row.IMPACTPRICE, 'IMPACTPRICE', true);
+              product.variants = [{
+                code: (row.VARIANTCODE || '').toString().trim() || null,
+                combination_name: (row.VARIANTNAME || 'Default Variant').toString().trim(),
+                price: variantPrice,
+                price_impact: variantPriceImpact,
+                stock: parseInt(row.QUANTITYVARIANT) || 0,
+                default_variant: String(row.DEFAULTVARIANT || '').trim().toLowerCase() === 'true',
+                attributes: parseAttributes(row.VARIANTNAME) || {}
+              }];
             }
 
-            return productData;
+            return product;
           });
 
           console.log('Products ready for import:', productsToImport);
           setImportStatus(`Prêt à importer ${productsToImport.length} produits...`);
+          setImportedProducts(productsToImport);
           simulateProgressThenImport(productsToImport);
         },
         error: (err) => {
@@ -238,256 +323,547 @@ export default function Products() {
     }
   };
 
+  const showSnackbar = (message, severity = 'success') => {
+    setSnackbarMessage(message);
+    setSnackbarSeverity(severity);
+    setSnackbarOpen(true);
+  };
+
+  const handleCloseSnackbar = () => {
+    setSnackbarOpen(false);
+  };
+
   const parseAttributes = (variantName) => {
     if (!variantName) return {};
 
     const attributes = {};
-    const pairs = variantName.toString().split('-');
-
+    const pairs = variantName.toString().split(',');
     pairs.forEach(pair => {
-      const [key, value] = pair.split(':').map(s => s.trim());
-      if (key && value) {
-        attributes[key] = value;
+      const [key, val] = pair.split(':').map(s => s.trim());
+      if (key && val) {
+        attributes[key] = val;
       }
     });
-
     return attributes;
   };
 
   const simulateProgressThenImport = (productsToImport) => {
     let progressValue = 0;
-    setProgress(progressValue);
-    setImportStatus('Importation en cours...');
+    setProgress(0);
 
     const interval = setInterval(() => {
       progressValue += 10;
-      if (progressValue >= 90) {
+      if (progressValue >= 100) {
         clearInterval(interval);
-        setProgress(90);
-        importProducts(productsToImport);
+        setProgress(100);
+        sendProductsToBackend(productsToImport);
       } else {
         setProgress(progressValue);
       }
-    }, 300);
+    }, 150);
   };
 
-  const importProducts = async (productsToImport) => {
-    try {
-      setImportStatus('Envoi au serveur...');
-      const response = await fetch('http://localhost:8000/pos/product/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ products: productsToImport }),
-      });
+  const sendProductsToBackend = async (productsToImport) => {
+    setImportStatus('Import en cours...');
+    setImportCount(0);
+    setImportedVariantsCount(0);
+    const errors = [];
+    const successfulImports = [];
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Erreur HTTP ${response.status}`);
+    try {
+      for (let i = 0; i < productsToImport.length; i++) {
+        try {
+          const product = productsToImport[i];
+
+          // Skip if no reference or product name
+          if (!product.code && !product.designation) {
+            continue;
+          }
+
+          const productPayload = {
+            code: product.code,
+            designation: product.designation,
+            category_name: product.category_name,
+            brand: product.brand,
+            description: product.description,
+            cost_price: Number(product.cost_price) || 0,
+            prix_ht: Number(product.prix_ht),
+            taxe: Number(product.taxe),
+            prix_ttc: Number(product.prix_ttc) || 0,
+            stock: Number(product.stock) || 0,
+            marge: Number(product.marge) || 0,
+            remise_max: Number(product.remise_max) || 0,
+            remise_valeur_max: Number(product.remise_valeur_max) || 0,
+            sellable: product.sellable,
+            has_variants: product.has_variants,
+            status: product.status || 'in_stock',
+            image_path: product.image_path || null,
+            sub_category_name: product.sub_category_name || null,
+            is_deleted: product.is_deleted || false,
+            date_expiration: product.date_expiration || null,
+            variants: product.variants || []
+          };
+
+          console.log(`Sending product payload for ${product.code}:`, JSON.stringify(productPayload, null, 2));
+          const productRes = await fetch('http://127.0.0.1:8000/pos/product/add', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRFToken': csrfToken,
+            },
+            credentials: 'include',
+            body: JSON.stringify(productPayload),
+          });
+          const responseText = await productRes.text();
+          console.log(`Response for ${product.code}:`, responseText);
+          if (!productRes.ok) {
+            throw new Error(`Erreur lors de la création du produit ${product.code}: ${responseText}`);
+          }
+
+
+          if (!productRes.ok) {
+            const errText = await productRes.text();
+            throw new Error(`Erreur lors de la création du produit ${product.code}: ${errText}`);
+          }
+
+          const productCreated = await productRes.json();
+          successfulImports.push({ ...product, backendId: productCreated.id || productCreated._id });
+          setImportCount((count) => count + 1);
+
+          // If this line has a variant, add it
+          if (product.has_variants && product.variant) {
+            const variantPayload = {
+              product_id: productCreated.id || productCreated._id,
+              combination_name: product.variant.combination_name,
+              price_impact: product.variant.price_impact,
+              stock: product.variant.stock,
+              default_variant: product.variant.default_variant,
+              attributes: product.variant.attributes,
+              price: product.variant.price,
+            };
+
+            const variantRes = await fetch(`http://127.0.0.1:8000/pos/product/${productCreated.id}/variant`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken,
+              },
+              credentials: 'include',
+              body: JSON.stringify(variantPayload),
+            });
+
+            if (!variantRes.ok) {
+              const errText = await variantRes.text();
+              throw new Error(`Erreur lors de la création d'une variante pour ${product.code}: ${errText}`);
+            }
+
+            setImportedVariantsCount((count) => count + 1);
+          }
+        } catch (error) {
+          errors.push({
+            rowNumber: productsToImport[i].rowNumber,
+            productCode: productsToImport[i].code,
+            message: error.message
+          });
+          console.error(`Error importing row ${productsToImport[i].rowNumber}:`, error);
+        }
       }
 
-      const result = await response.json();
-      console.log('Import result:', result);
+      setImportStatus('Import terminé avec succès!');
+      setImportErrors(errors);
+      setImportedProducts(successfulImports);
+      setShowImportSummary(true);
 
-      setImportCount(result.importedCount || productsToImport.length);
-      setImportedVariantsCount(result.importedVariantsCount || 0);
-      setImportStatus('Importation réussie!');
-      setProgress(100);
+      if (errors.length > 0) {
+        showSnackbar(`Import completed with ${errors.length} errors`, 'warning');
+      } else {
+        showSnackbar('Import terminé avec succès!', 'success');
+      }
 
-      showSnackbar(
-        `Importation réussie: ${result.importedCount || productsToImport.length} produits et ${result.importedVariantsCount || 0} variantes`
-      );
-
-      fetchProducts();
+      // Refresh the product list after import
+      await fetchProducts();
     } catch (error) {
       console.error('Import error:', error);
-      setErrorMessage(`Erreur lors de l'import: ${error.message}`);
+      setErrorMessage(error.message);
       setImportStatus("Échec de l'importation");
-      setProgress(0);
-      showSnackbar(`Erreur lors de l'import: ${error.message}`, 'error');
+      showSnackbar(error.message, 'error');
     } finally {
       setIsImporting(false);
+      setProgress(0);
     }
   };
 
-  const fetchProducts = async () => {
-    setIsLoading(true);
+  const handleViewVariants = (product) => {
+    setCurrentProduct(product);
+    setOpenVariantsDialog(true);
+  };
+
+  const handleExportProducts = () => {
     try {
-      const response = await fetch('http://localhost:8000/pos/product/get');
-      if (!response.ok) {
-        throw new Error(`Erreur HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      setProducts(data);
+      const headers = [
+        'Reference', 'Designation', 'Category', 'Brand',
+        'Description', 'Cost Price', 'Price HT', 'VAT',
+        'Price TTC', 'Sellable', 'Has Variants', 'Stock'
+      ];
+
+      const csvData = [
+        headers,
+        ...products.map(p => [
+          p.code,
+          p.designation,
+          p.category_name,
+          p.brand,
+          p.description,
+          p.prix_ht,
+          p.prix_ht,
+          p.taxe,
+          p.prix_ttc,
+          p.sellable ? 'Yes' : 'No',
+          p.has_variants ? 'Yes' : 'No',
+          p.stock
+        ])
+      ];
+
+      const csvContent = csvData.map(row =>
+        row.map(field => `"${field?.toString().replace(/"/g, '""') || ''}"`).join(',')
+      ).join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `products_export_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      showSnackbar('Products exported successfully', 'success');
     } catch (error) {
-      console.error('Error fetching products:', error);
-      setErrorMessage(`Erreur lors du chargement des produits: ${error.message}`);
-      showSnackbar(`Erreur lors du chargement des produits: ${error.message}`, 'error');
-    } finally {
-      setIsLoading(false);
+      console.error('Export error:', error);
+      showSnackbar(`Failed to export products: ${error.message}`, 'error');
     }
   };
 
-  const downloadTemplate = () => {
-    const headers = [
-      "ACTION", "IMAGE", "PRODUCTNAME", "REFERENCE", "CATEGORY", "BRAND",
-      "DESCRIPTION", "COSTPRICE", "SELLPRICETAXEXCLUDE", "VAT", "SELLPRICETAXINCLUDE",
-      "QUANTITY", "SELLABLE", "SIMPLEPRODUCT", "VARIANTNAME", "DEFAULTVARIANT",
-      "VARIANTIMAGE", "IMPACTPRICE", "QUANTITYVARIANT"
-    ].join(',');
-
-    const exampleSimpleProduct = [
-      "CREATE", "product_image.jpg", "Produit Simple Exemple", "PROD001",
-      "Catégorie Exemple", "Marque Exemple", "Description du produit", "10.0", "15.0",
-      "20.0", "18.0", "100", "TRUE", "TRUE", "", "", "", "", ""
-    ].join(',');
-
-    const exampleVariant1 = [
-      "CREATE", "product_with_variants.jpg", "Produit avec Variantes", "PROD002",
-      "Catégorie Exemple", "Marque Exemple", "Description du produit avec variantes", "10.0",
-      "15.0", "20.0", "18.0", "0", "TRUE", "FALSE", "Couleur:Rouge-Taille:M", "TRUE",
-      "variant_image1.jpg", "0", "50"
-    ].join(',');
-
-    const exampleVariant2 = [
-      "CREATE", "product_with_variants.jpg", "Produit avec Variantes", "PROD002",
-      "Catégorie Exemple", "Marque Exemple", "Description du produit avec variantes", "10.0",
-      "15.0", "20.0", "18.0", "0", "TRUE", "FALSE", "Couleur:Bleu-Taille:L", "FALSE",
-      "variant_image2.jpg", "1", "30"
-    ].join(',');
-
-    const csvContent = [headers, exampleSimpleProduct, exampleVariant1, exampleVariant2].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', 'modele_produits.csv');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleCloseImportSummary = () => {
+    setShowImportSummary(false);
   };
-
-  useEffect(() => {
-    fetchProducts();
-  }, []);
 
   return (
-    <Box display="flex" height="100vh" width="100vw" overflow="hidden">
+    <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: '#f5f5f5' }}>
       <Sidebar />
-      <Box
-        component="main"
-        sx={{ flexGrow: 1, bgcolor: 'background.default', p: 3, overflow: 'auto' }}
-      >
+      <Box sx={{ flexGrow: 1, p: 3 }}>
         <Header />
-        <Typography variant="h4" gutterBottom>
-          Produits
-        </Typography>
-        <Card sx={{ p: 2, mb: 4 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <label htmlFor="csv-file-input">
-              <VisuallyHiddenInput
-                id="csv-file-input"
-                type="file"
-                accept=".csv"
-                disabled={isImporting}
-                onChange={handleFileImport}
-              />
-              <Button
-                variant="contained"
-                component="span"
-                startIcon={<CloudUploadIcon />}
-                disabled={isImporting}
-              >
-                Importer produits CSV
-              </Button>
-            </label>
+        <Card sx={{ p: 4, maxWidth: 1200, margin: 'auto', mt: 4 }}>
+          <Typography variant="h5" mb={2}>Gestion des produits</Typography>
 
-            <Button
-              variant="outlined"
-              startIcon={<DownloadIcon />}
-              onClick={downloadTemplate}
-              disabled={isImporting}
-            >
-              Télécharger modèle CSV
-            </Button>
+          {isLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 100 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <>
+              <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Box>
+                  <label htmlFor="file-input">
+                    <VisuallyHiddenInput
+                      id="file-input"
+                      type="file"
+                      accept=".csv, .xlsx, .xls"
+                      onChange={handleFileImport}
+                      disabled={isImporting}
+                    />
+                    <Button
+                      variant="contained"
+                      component="span"
+                      startIcon={<CloudUploadIcon />}
+                      disabled={isImporting}
+                      sx={{ mr: 2 }}
+                    >
+                      {isImporting ? 'Import en cours...' : 'Importer des produits'}
+                    </Button>
+                  </label>
+                  <Button
+                    variant="outlined"
+                    startIcon={<DownloadIcon />}
+                    onClick={handleExportProducts}
+                    sx={{ mr: 2 }}
+                  >
+                    Exporter
+                  </Button>
+                  <Tooltip title="Refresh products">
+                    <IconButton onClick={fetchProducts}>
+                      <RefreshIcon />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
 
-            {isImporting && (
-              <Button
-                variant="text"
-                color="error"
-                onClick={() => {
-                  setIsImporting(false);
-                  setProgress(0);
-                  setImportStatus('Import annulé');
-                  showSnackbar('Import annulé par l\'utilisateur', 'info');
-                }}
-              >
-                Annuler import
-              </Button>
-            )}
-          </Box>
+                <TextField
+                  variant="outlined"
+                  size="small"
+                  placeholder="Rechercher des produits..."
+                  InputProps={{
+                    startAdornment: <SearchIcon sx={{ mr: 1, color: 'action.active' }} />,
+                  }}
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              </Box>
 
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="body1" gutterBottom>
-              Statut: {importStatus}
-            </Typography>
-            <LinearProgress variant="determinate" value={progress} />
-          </Box>
+              {isImporting && (
+                <Box sx={{ width: '100%', mb: 3, p: 2, bgcolor: 'background.paper', borderRadius: 1 }}>
+                  <Typography variant="subtitle1" gutterBottom>
+                    {importStatus}
+                  </Typography>
+                  <LinearProgress variant="determinate" value={progress} sx={{ height: 8, mb: 1 }} />
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Typography variant="body2">
+                      Produits importés: <strong>{importCount}</strong>
+                    </Typography>
+                    <Typography variant="body2">
+                      Variantes importées: <strong>{importedVariantsCount}</strong>
+                    </Typography>
+                    <Typography variant="body2">
+                      Progression: <strong>{progress}%</strong>
+                    </Typography>
+                  </Box>
+                </Box>
+              )}
 
-          {errorMessage && (
-            <Typography variant="body2" color="error" sx={{ mt: 2 }}>
-              {errorMessage}
-            </Typography>
+              <Typography variant="h6" mb={2}>
+                Liste des produits ({filteredProducts.length})
+                {searchTerm && (
+                  <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
+                    (Filtrés pour "{searchTerm}")
+                  </Typography>
+                )}
+              </Typography>
+
+              <TableContainer component={Paper} sx={{ mt: 2 }}>
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Référence</TableCell>
+                      <TableCell>Désignation</TableCell>
+                      <TableCell>Catégorie</TableCell>
+                      <TableCell>Marque</TableCell>
+                      <TableCell>Prix HT</TableCell>
+                      <TableCell>Stock</TableCell>
+                      <TableCell>Actions</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {filteredProducts.length > 0 ? (
+                      filteredProducts.map((product) => (
+                        <TableRow key={product._id || product.id}>
+                          <TableCell>{product.code || '-'}</TableCell>
+                          <TableCell>{product.designation || '-'}</TableCell>
+                          <TableCell>
+                            <Chip
+                              label={product.category_name || '-'}
+                              size="small"
+                              sx={{
+                                backgroundColor: 'primary.light',
+                                color: 'primary.contrastText'
+                              }}
+                            />
+                          </TableCell>
+                          <TableCell>{product.brand || '-'}</TableCell>
+                          <TableCell>{product.prix_ttc?.toFixed(2) ?? '-'} DT</TableCell>
+                          <TableCell>
+                            {product.has_variants ? (
+                              <Button
+                                size="small"
+                                onClick={() => handleViewVariants(product)}
+                                startIcon={<VisibilityIcon />}
+                              >
+                                Variantes ({product.variants?.length || 0})
+                              </Button>
+                            ) : (
+                              product.stock ?? 0
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <IconButton size="small">
+                              <VisibilityIcon fontSize="small" />
+                            </IconButton>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={7} align="center">
+                          {searchTerm ?
+                            'Aucun produit ne correspond à votre recherche' :
+                            'Aucun produit trouvé'}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </>
           )}
 
-          {(importCount > 0 || importedVariantsCount > 0) && (
-            <Typography variant="body2" color="success.main" sx={{ mt: 2 }}>
-              {importCount} produits importés, {importedVariantsCount} variantes importées.
+          {errorMessage && (
+            <Typography color="error" sx={{ mt: 2, whiteSpace: 'pre-wrap' }}>
+              {errorMessage}
             </Typography>
           )}
         </Card>
 
-        {isLoading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-            <CircularProgress />
-          </Box>
-        ) : products.length === 0 ? (
-          <Typography variant="body1" color="text.secondary" sx={{ textAlign: 'center', p: 2 }}>
-            Aucun produit disponible
-          </Typography>
-        ) : (
-          <Box sx={{ maxHeight: 500, overflowY: 'auto' }}>
-            {products.map((product) => (
-              <Card key={product.code} sx={{ mb: 2, p: 2 }}>
-                <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-                  {product.designation} ({product.code})
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Catégorie: {product.category_name} - Marque: {product.brand}
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                  Prix HT: {product.prix_ht} € - Prix TTC: {product.prix_ttc} €
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Stock: {product.stock ?? 'N/A'}
-                </Typography>
+        {/* Variants Dialog */}
+        <Dialog
+          open={openVariantsDialog}
+          onClose={() => setOpenVariantsDialog(false)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle>
+            Variantes pour {currentProduct?.designation || 'Produit'}
+            <IconButton
+              aria-label="close"
+              onClick={() => setOpenVariantsDialog(false)}
+              sx={{
+                position: 'absolute',
+                right: 8,
+                top: 8,
+                color: (theme) => theme.palette.grey[500],
+              }}
+            >
+              <CloseIcon />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent>
+            <TableContainer component={Paper}>
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Combinaison</TableCell>
+                    <TableCell>Prix</TableCell>
+                    <TableCell>Stock</TableCell>
+                    <TableCell>Par défaut</TableCell>
+                    <TableCell>Attributs</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {currentProduct?.variants?.length > 0 ? (
+                    currentProduct.variants.map((variant) => (
+                      <TableRow key={variant.id}>
+                        <TableCell>{variant.combination_name || '-'}</TableCell>
+                        <TableCell>{variant.price?.toFixed(2)} DT</TableCell>
+                        <TableCell>{variant.stock}</TableCell>
+                        <TableCell>
+                          {variant.default_variant ?
+                            <Chip label="Oui" color="success" size="small" /> :
+                            <Chip label="Non" size="small" />
+                          }
+                        </TableCell>
+                        <TableCell>
+                          {variant.attributes && Object.keys(variant.attributes).length > 0 ? (
+                            <Box sx={{ display: 'flex', gap: 1 }}>
+                              {Object.entries(variant.attributes).map(([key, value]) => (
+                                <Chip
+                                  key={key}
+                                  label={`${key}: ${value}`}
+                                  size="small"
+                                />
+                              ))}
+                            </Box>
+                          ) : '-'}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  ) : (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center">
+                        Aucune variante trouvée
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setOpenVariantsDialog(false)}>Fermer</Button>
+          </DialogActions>
+        </Dialog>
 
-                {product.has_variants && product.variants?.length > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="subtitle2">Variantes :</Typography>
-                    {product.variants.map((variant, i) => (
-                      <Box key={i} sx={{ pl: 2, mb: 1 }}>
-                        <Typography variant="body2">
-                          {variant.combination_name} - Stock: {variant.stock} - Impact Prix: {variant.price_impact} €
-                        </Typography>
-                      </Box>
-                    ))}
-                  </Box>
-                )}
-              </Card>
-            ))}
-          </Box>
-        )}
+        {/* Import Summary Dialog */}
+        <Dialog
+          open={showImportSummary}
+          onClose={handleCloseImportSummary}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle>
+            Résumé de l'importation
+            <IconButton
+              aria-label="close"
+              onClick={handleCloseImportSummary}
+              sx={{
+                position: 'absolute',
+                right: 8,
+                top: 8,
+                color: (theme) => theme.palette.grey[500],
+              }}
+            >
+              <CloseIcon />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent>
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="h6" gutterBottom>
+                Statistiques d'importation
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 3, mb: 2 }}>
+                <Box sx={{ p: 2, bgcolor: 'success.light', borderRadius: 1, flex: 1 }}>
+                  <Typography variant="body2">Produits importés</Typography>
+                  <Typography variant="h4">{importCount}</Typography>
+                </Box>
+                <Box sx={{ p: 2, bgcolor: 'info.light', borderRadius: 1, flex: 1 }}>
+                  <Typography variant="body2">Variantes importées</Typography>
+                  <Typography variant="h4">{importedVariantsCount}</Typography>
+                </Box>
+                <Box sx={{ p: 2, bgcolor: importErrors.length > 0 ? 'error.light' : 'grey.200', borderRadius: 1, flex: 1 }}>
+                  <Typography variant="body2">Erreurs</Typography>
+                  <Typography variant="h4">{importErrors.length}</Typography>
+                </Box>
+              </Box>
+            </Box>
+
+            {importErrors.length > 0 && (
+              <Box sx={{ mt: 3 }}>
+                <Typography variant="h6" gutterBottom>
+                  Erreurs d'importation
+                </Typography>
+                <TableContainer component={Paper}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Ligne</TableCell>
+                        <TableCell>Référence</TableCell>
+                        <TableCell>Message d'erreur</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {importErrors.map((error, index) => (
+                        <TableRow key={index}>
+                          <TableCell>{error.rowNumber}</TableCell>
+                          <TableCell>{error.productCode || '-'}</TableCell>
+                          <TableCell sx={{ color: 'error.main' }}>{error.message}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleCloseImportSummary}>Fermer</Button>
+          </DialogActions>
+        </Dialog>
 
         <Snackbar
           open={snackbarOpen}

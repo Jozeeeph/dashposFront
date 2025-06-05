@@ -16,9 +16,11 @@ import {
   Paper,
   TextField,
   Collapse,
-  IconButton
+  IconButton,
 } from '@mui/material';
 import { ExpandMore, ExpandLess } from '@mui/icons-material';
+import * as XLSX from 'xlsx';
+import FileDownload from 'js-file-download';
 
 export default function Warehouses() {
   const [warehouses, setWarehouses] = useState([]);
@@ -43,17 +45,14 @@ export default function Warehouses() {
       try {
         const [productsResponse, warehousesResponse] = await Promise.all([
           fetchProducts(),
-          fetchWarehouses()
+          fetchWarehouses(),
         ]);
-        
-        // Handle case where response might be an object with products property
+
         const productsArray = productsResponse.products || productsResponse;
         await ensureProductsInWarehouses(productsArray, warehousesResponse);
 
-        // Re-fetch products to ensure updated stock values
         const updatedProducts = await fetchProducts();
         setAllProducts(updatedProducts.products || updatedProducts);
-
       } catch (error) {
         setError(`Error loading data: ${error.message}`);
       } finally {
@@ -185,13 +184,12 @@ export default function Warehouses() {
   };
 
   const distributeStock = async () => {
-    // Handle case where allProducts might be an object with products property
     const productsToDistribute = allProducts.products || allProducts;
-    
+
     if (!productsToDistribute || !productsToDistribute.length) {
       return setError('No products available for distribution');
     }
-    
+
     setIsUpdating(true);
     try {
       for (const product of productsToDistribute) {
@@ -218,6 +216,78 @@ export default function Warehouses() {
     }
   };
 
+  const exportWarehouseToExcel = (warehouse) => {
+    const productsToExport = allProducts.products || allProducts;
+
+    if (!productsToExport || !productsToExport.length) {
+      return setError('No products available for export');
+    }
+
+    try {
+      const data = warehouse.stock?.flatMap(stockItem => {
+        const product = productsToExport.find(p => p.id === stockItem.product_id);
+        if (!product) return [];
+
+        if (product.has_variants && product.variants?.length) {
+          return product.variants.map(variant => ({
+            ACTION: '',
+            IMAGE: '',
+            PRODUCTNAME: product.designation || '',
+            REFERENCE: product.code || '',
+            CATEGORY: product.category?.name || '',
+            BRAND: product.brand || '',
+            DESCRIPTION: product.description || '',
+            COSTPRICE: product.prix_ht || 0,
+            SELLPRICETAXEXCLUDE: product.prix_ht || 0,
+            VAT: product.taxe || 0,
+            SELLPRICETAXINCLUDE: product.prix_ttc * (1 + (product.taxe || 0) / 100),
+            QUANTITY: variant.stock || 0,
+            SELLABLE: product.sellable ? 'Oui' : 'Non',
+            SIMPLEPRODUCT: 'Non',
+            VARIANTNAME: variant.name || '',
+            DEFAULTVARIANT: variant.is_default ? 'Oui' : 'Non',
+            VARIANTIMAGE: '',
+            IMPACTPRICE: variant.impact_price || '',
+            QUANTITYVARIANT: variant.stock || '',
+          }));
+        }
+
+        return [{
+          ACTION: '',
+          IMAGE: '',
+          PRODUCTNAME: product.designation || '',
+          REFERENCE: product.code || '',
+          CATEGORY: product.category?.name || '',
+          BRAND: product.brand || '',
+          DESCRIPTION: product.description || '',
+          COSTPRICE: product.prix_ht || 0,
+          SELLPRICETAXEXCLUDE: product.prix_ht || 0,
+          VAT: product.taxe || 0,
+          SELLPRICETAXINCLUDE: product.prix_ttc * (1 + (product.taxe || 0) / 100),
+          QUANTITY: stockItem.quantity || 0,
+          SELLABLE: product.sellable ? 'Oui' : 'Non',
+          SIMPLEPRODUCT: 'Oui',
+          VARIANTNAME: '',
+          DEFAULTVARIANT: '',
+          VARIANTIMAGE: '',
+          IMPACTPRICE: '',
+          QUANTITYVARIANT: '',
+        }];
+      }) || [];
+
+      if (!data.length) {
+        return setError(`No stock data available to export for ${warehouse.name}`);
+      }
+
+      const worksheet = XLSX.utils.json_to_sheet(data);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, `${warehouse.name}_Stock`);
+      XLSX.writeFile(workbook, `${warehouse.name}_Stock.xlsx`);
+    } catch (error) {
+      setError(`Error exporting Excel file for ${warehouse.name}: ${error.message}`);
+    }
+  };
+
   return (
     <Box sx={{ display: 'flex' }}>
       <Sidebar />
@@ -240,14 +310,15 @@ export default function Warehouses() {
             </Box>
           ) : (
             <>
-              <Button 
-                variant="contained" 
-                onClick={distributeStock} 
-                disabled={isUpdating}
-                sx={{ mb: 3 }}
-              >
-                {isUpdating ? 'Distributing...' : 'Distribute Stock'}
-              </Button>
+              <Box sx={{ display: 'flex', gap: 2, mb: 3 }}>
+                <Button
+                  variant="contained"
+                  onClick={distributeStock}
+                  disabled={isUpdating}
+                >
+                  {isUpdating ? 'Distributing...' : 'Distribute Stock'}
+                </Button>
+              </Box>
 
               {warehouses.map(warehouse => (
                 <Paper key={warehouse.id} sx={{ mt: 2, p: 2 }}>
@@ -262,25 +333,35 @@ export default function Warehouses() {
                         sx={{ width: 100, mr: 1 }}
                         inputProps={{ min: 0, max: 100 }}
                       />
-                      <Button 
+                      <Button
                         onClick={() => updatePercentage(warehouse.id)}
                         disabled={isUpdating}
+                        sx={{ mr: 1 }}
                       >
                         Update
+                      </Button>
+                      <Button
+                        variant="contained"
+                        color="secondary"
+                        onClick={() => exportWarehouseToExcel(warehouse)}
+                        disabled={isUpdating}
+                        sx={{ mr: 1 }}
+                      >
+                        Export Stock
                       </Button>
                       <IconButton onClick={() => toggleWarehouse(warehouse.id)}>
                         {expandedWarehouseId === warehouse.id ? <ExpandLess /> : <ExpandMore />}
                       </IconButton>
                     </Box>
                   </Box>
-                  
+
                   <Collapse in={expandedWarehouseId === warehouse.id}>
                     <TableContainer>
                       <Table>
                         <TableHead>
                           <TableRow>
-                            <TableCell>Product</TableCell>
-                            <TableCell>Current Stock</TableCell>
+                            <TableCell>Product Name</TableCell>
+                            <TableCell>Quantity</TableCell>
                             <TableCell>New Quantity</TableCell>
                             <TableCell>Action</TableCell>
                           </TableRow>
@@ -303,7 +384,7 @@ export default function Warehouses() {
                                   />
                                 </TableCell>
                                 <TableCell>
-                                  <Button 
+                                  <Button
                                     onClick={() => updateQuantity(warehouse.id, product.id)}
                                     disabled={isUpdating || editedQuantities[key] === undefined}
                                   >

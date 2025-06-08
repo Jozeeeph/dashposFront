@@ -91,7 +91,6 @@ export default function Products() {
     csrfToken = getCookie('csrftoken');
   }
 
-  // Fetch products on component mount and when refresh is needed
   const fetchProducts = async () => {
     setIsLoading(true);
     setError(null);
@@ -122,7 +121,6 @@ export default function Products() {
     fetchProducts();
   }, []);
 
-  // Filter products based on search term
   useEffect(() => {
     if (searchTerm.trim() === '') {
       setFilteredProducts(products);
@@ -136,12 +134,10 @@ export default function Products() {
       setFilteredProducts(filtered);
     }
   }, [searchTerm, products]);
-
-  const handleFileImport = async (event) => {
+const handleFileImport = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Reset state
     setIsImporting(true);
     setImportStatus('Analyse du fichier...');
     setErrorMessage('');
@@ -153,7 +149,6 @@ export default function Products() {
     setShowImportSummary(false);
 
     try {
-      // Validate file type
       const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
       const isCSV = file.name.endsWith('.csv');
 
@@ -165,32 +160,26 @@ export default function Products() {
       let delimiter = ',';
 
       if (isExcel) {
-        // Process Excel file
         setImportStatus('Conversion du fichier Excel en CSV...');
         const data = await file.arrayBuffer();
         const workbook = XLSX.read(data);
         const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
         csvText = XLSX.utils.sheet_to_csv(firstSheet);
       } else {
-        // Process CSV file
         csvText = await file.text();
-
-        // Detect delimiter
         const firstLine = csvText.split('\n')[0];
         const tabCount = (firstLine.match(/\t/g) || []).length;
         const commaCount = (firstLine.match(/,/g) || []).length;
         delimiter = tabCount > commaCount ? '\t' : ',';
       }
 
-      // Basic validation
       const lines = csvText.split('\n').filter(line => line.trim() !== '');
-      const expectedColumns = 19;
+      const expectedColumns = 19; // adjust this to your file structure
 
       if (lines.length < 2) {
         throw new Error('Le fichier doit contenir au moins une ligne d\'en-tête et une ligne de données');
       }
 
-      // Verify header column count
       const headerColumns = lines[0].split(delimiter).length;
       if (headerColumns !== expectedColumns) {
         throw new Error(
@@ -200,7 +189,6 @@ export default function Products() {
         );
       }
 
-      // Parse with PapaParse
       setImportStatus('Analyse des données...');
 
       Papa.parse(csvText, {
@@ -213,9 +201,6 @@ export default function Products() {
         transform: (value) => typeof value === 'string' ? value.trim() : value,
         transformHeader: (header) => header.trim(),
         complete: (results) => {
-          console.log('Parsing complete', results);
-
-          // Enhanced error handling
           if (results.errors.length > 0) {
             const criticalErrors = results.errors.filter(
               e => e.type === 'FieldMismatch' || e.type === 'UndetectableDelimiter'
@@ -240,88 +225,327 @@ export default function Products() {
             throw new Error('Aucune donnée valide trouvée dans le fichier');
           }
 
-          // Process data line by line
-          setImportStatus('Préparation des données...');
-          const productsToImport = results.data.map((row, index) => {
-            const parseNumber = (value, fieldName, required = false, defaultValue = 0) => {
-              if (value === null || value === undefined || value === '') {
-                if (required) throw new Error(`Missing required field ${fieldName} at row ${index + 2}`);
-                return defaultValue;
-              }
-              const cleanedValue = String(value).replace(',', '.').trim();
-              const parsed = parseFloat(cleanedValue);
-              if (isNaN(parsed)) throw new Error(`Invalid ${fieldName} at row ${index + 2}: ${value}`);
-              return parsed;
-            };
+          setImportStatus('Groupement des produits et variantes...');
 
-            const prixHT = parseNumber(row.SELLPRICETAXEXCLUDE, 'SELLPRICETAXEXCLUDE', true);
-            const taxe = parseNumber(row.VAT, 'VAT', true);
-            const prixTTC = parseNumber(row.SELLPRICETAXINCLUDE, 'SELLPRICETAXINCLUDE', false);
-            const costPrice = parseNumber(row.COSTPRICE, 'COSTPRICE', false);
-            const isSimple = String(row.SIMPLEPRODUCT || '').trim().toLowerCase();
-            const hasVariants = isSimple === 'false';
+          const productGroups = {};
+          results.data.forEach((row, index) => {
+            const productReference = (row.REFERENCE || '').toString().trim();
+            const productName = (row.PRODUCTNAME || '').toString().trim();
 
-            const product = {
-              code: (row.REFERENCE || '').toString().trim() || null,
-              designation: (row.PRODUCTNAME || '').toString().trim(),
-              category_name: (row.CATEGORY || 'Default').toString().trim(),
-              brand: (row.BRAND || '').toString().trim() || null,
-              description: (row.DESCRIPTION || '').toString() || null,
-              cost_price: costPrice,
-              prix_ht: prixHT,
-              taxe: taxe,
-              prix_ttc: prixTTC,
-              stock: hasVariants ? 0 : parseInt(row.QUANTITY) || 0,
-              marge: parseNumber(row.MARGE, 'MARGE', false, 0),
-              remise_max: parseNumber(row.REMISE_MAX, 'REMISE_MAX', false),
-              remise_valeur_max: parseNumber(row.REMISE_VALEUR_MAX, 'REMISE_VALEUR_MAX', false),
-              sellable: String(row.SELLABLE || '').trim().toLowerCase() === 'true',
-              has_variants: hasVariants,
-              status: (row.STATUS || 'in_stock').toString().trim(),
-              image_path: (row.IMAGE || '').toString().trim() || null,
-              sub_category_name: (row.SUB_CATEGORY || '').toString().trim() || null,
-              is_deleted: false,
-              date_expiration: row.DATE_EXPIRE || null,
-              rowNumber: index + 2,
-              variants: []
-            };
+            if (!productName) return;
 
-            if (hasVariants) {
-              const variantPrice = parseNumber(row.PRICE, 'PRICE', true);
-              const variantPriceImpact = parseNumber(row.IMPACTPRICE, 'IMPACTPRICE', true);
-              product.variants = [{
-                code: (row.VARIANTCODE || '').toString().trim() || null,
-                combination_name: (row.VARIANTNAME || 'Default Variant').toString().trim(),
-                price: variantPrice,
-                price_impact: variantPriceImpact,
-                stock: parseInt(row.QUANTITYVARIANT) || 0,
-                default_variant: String(row.DEFAULTVARIANT || '').trim().toLowerCase() === 'true',
-                attributes: parseAttributes(row.VARIANTNAME) || {}
-              }];
+            const groupKey = productReference || productName;
+            if (!productGroups[groupKey]) {
+              productGroups[groupKey] = [];
             }
-
-            return product;
+            productGroups[groupKey].push({ ...row, rowNumber: index + 2 });
           });
 
-          console.log('Products ready for import:', productsToImport);
-          setImportStatus(`Prêt à importer ${productsToImport.length} produits...`);
-          setImportedProducts(productsToImport);
+          const productsToImport = [];
+          const importErrors = [];
+
+          Object.values(productGroups).forEach(productRows => {
+            if (productRows.length === 0) return;
+
+            const firstRow = productRows[0];
+            const isSimpleProduct = String(firstRow.SIMPLEPRODUCT || '').trim().toLowerCase() !== 'false';
+
+            try {
+              const parseNumber = (value, fieldName, required = false, defaultValue = 0) => {
+                if (value === null || value === undefined || value === '') {
+                  if (required) throw new Error(`Missing required field ${fieldName}`);
+                  return defaultValue;
+                }
+                const cleanedValue = String(value).replace(',', '.').trim();
+                const parsed = parseFloat(cleanedValue);
+                if (isNaN(parsed)) throw new Error(`Invalid ${fieldName}: ${value}`);
+                return parsed;
+              };
+
+              const prixHT = parseNumber(firstRow.SELLPRICETAXEXCLUDE, 'SELLPRICETAXEXCLUDE', true);
+              const taxe = parseNumber(firstRow.VAT, 'VAT', true);
+              const prixTTC = parseFloat((prixHT + (prixHT * taxe / 100)).toFixed(2));
+              const costPrice = parseNumber(firstRow.COSTPRICE, 'COSTPRICE', false);
+
+              const product = {
+                code: (firstRow.REFERENCE || '').toString().trim() || null,
+                designation: (firstRow.PRODUCTNAME || '').toString().trim(),
+                category_name: (firstRow.CATEGORY || 'Default').toString().trim(),
+                brand: (firstRow.BRAND || '').toString().trim() || null,
+                description: "",
+                cost_price: costPrice,
+                prix_ht: prixHT,
+                taxe: taxe,
+                prix_ttc: prixTTC,
+                stock: isSimpleProduct ? parseInt(firstRow.QUANTITY) || 0 : 0,
+                marge: parseNumber(firstRow.MARGE, 'MARGE', false, 0),
+                remise_max: parseNumber(firstRow.REMISE_MAX, 'REMISE_MAX', false),
+                remise_valeur_max: parseNumber(firstRow.REMISE_VALEUR_MAX, 'REMISE_VALEUR_MAX', false),
+                sellable: String(firstRow.SELLABLE || '').trim().toLowerCase() === 'true',
+                has_variants: !isSimpleProduct,
+                status: (firstRow.STATUS || 'in_stock').toString().trim(),
+                image_path: (firstRow.IMAGE || '').toString().trim() || null,
+                sub_category_name: (firstRow.SUB_CATEGORY || '').toString().trim() || null,
+                is_deleted: false,
+                date_expiration: firstRow.DATE_EXPIRE || null,
+                rowNumber: firstRow.rowNumber,
+                variants: []
+              };
+
+              if (!isSimpleProduct) {
+                product.variants = productRows.map(row => {
+                  const variantPriceImpact = parseNumber(row.IMPACTPRICE, 'IMPACTPRICE', true);
+                  const variantPriceTTC = parseFloat((prixTTC + variantPriceImpact).toFixed(2));
+                  return {
+                    variant_name: (row.VARIANTNAME || '').toString().trim(),
+                    variant_code: (row.VARIANTCODE || '').toString().trim() || null,
+                    attributes: parseAttributes(row.VARIANTNAME),
+                    price: variantPriceTTC,
+                    stock: parseInt(row.QUANTITYVARIANT) || 0,
+                    rowNumber: row.rowNumber
+                  };
+                });
+              }
+
+              productsToImport.push(product);
+            } catch (err) {
+              importErrors.push(`Erreur à la ligne ${firstRow.rowNumber}: ${err.message}`);
+            }
+          });
+
+          if (importErrors.length > 0) {
+            setImportErrors(importErrors);
+            setIsImporting(false);
+            setImportStatus('Erreurs détectées lors de l\'importation');
+            setShowImportSummary(true);
+            return;
+          }
+
+          setImportCount(productsToImport.length);
+          setImportedVariantsCount(productsToImport.reduce((acc, p) => acc + (p.variants ? p.variants.length : 0), 0));
+
           simulateProgressThenImport(productsToImport);
         },
         error: (err) => {
-          throw new Error(`Erreur d'analyse: ${err.message}`);
+          setIsImporting(false);
+          setImportStatus('');
+          setErrorMessage('Erreur lors du parsing du fichier: ' + err.message);
         }
       });
-
-    } catch (error) {
-      console.error('Import error:', error);
-      setErrorMessage(error.message);
-      setImportStatus("Échec de l'importation");
-      setProgress(0);
-      showSnackbar(error.message, 'error');
+    } catch (e) {
       setIsImporting(false);
+      setImportStatus('');
+      setErrorMessage(e.message);
     }
   };
+  // const handleFileImport = async (event) => {
+  //   const file = event.target.files[0];
+  //   if (!file) return;
+
+  //   setIsImporting(true);
+  //   setImportStatus('Analyse du fichier...');
+  //   setErrorMessage('');
+  //   setImportCount(0);
+  //   setImportedVariantsCount(0);
+  //   setProgress(0);
+  //   setImportedProducts([]);
+  //   setImportErrors([]);
+  //   setShowImportSummary(false);
+
+  //   try {
+  //     const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+  //     const isCSV = file.name.endsWith('.csv');
+
+  //     if (!isExcel && !isCSV) {
+  //       throw new Error('Seuls les fichiers CSV (.csv) ou Excel (.xlsx, .xls) sont acceptés');
+  //     }
+
+  //     let csvText = '';
+  //     let delimiter = ',';
+
+  //     if (isExcel) {
+  //       setImportStatus('Conversion du fichier Excel en CSV...');
+  //       const data = await file.arrayBuffer();
+  //       const workbook = XLSX.read(data);
+  //       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  //       csvText = XLSX.utils.sheet_to_csv(firstSheet);
+  //     } else {
+  //       csvText = await file.text();
+  //       const firstLine = csvText.split('\n')[0];
+  //       const tabCount = (firstLine.match(/\t/g) || []).length;
+  //       const commaCount = (firstLine.match(/,/g) || []).length;
+  //       delimiter = tabCount > commaCount ? '\t' : ',';
+  //     }
+
+  //     const lines = csvText.split('\n').filter(line => line.trim() !== '');
+  //     const expectedColumns = 19;
+
+  //     if (lines.length < 2) {
+  //       throw new Error('Le fichier doit contenir au moins une ligne d\'en-tête et une ligne de données');
+  //     }
+
+  //     const headerColumns = lines[0].split(delimiter).length;
+  //     if (headerColumns !== expectedColumns) {
+  //       throw new Error(
+  //         `L'en-tête doit contenir ${expectedColumns} colonnes. ${headerColumns} trouvées.\n` +
+  //         `Séparateur détecté: ${delimiter === '\t' ? 'Tabulation' : 'Virgule'}\n` +
+  //         `Assurez-vous que toutes les valeurs contenant des virgules ou tabulations sont entre guillemets ("value")`
+  //       );
+  //     }
+
+  //     setImportStatus('Analyse des données...');
+
+  //     Papa.parse(csvText, {
+  //       header: true,
+  //       skipEmptyLines: true,
+  //       delimiter,
+  //       quoteChar: '"',
+  //       escapeChar: '"',
+  //       dynamicTyping: true,
+  //       transform: (value) => typeof value === 'string' ? value.trim() : value,
+  //       transformHeader: (header) => header.trim(),
+  //       complete: (results) => {
+  //         console.log('Parsing complete', results);
+
+  //         if (results.errors.length > 0) {
+  //           const criticalErrors = results.errors.filter(
+  //             e => e.type === 'FieldMismatch' || e.type === 'UndetectableDelimiter'
+  //           );
+
+  //           if (criticalErrors.length > 0) {
+  //             const errorDetails = criticalErrors.map(e =>
+  //               `Ligne ${e.row + 1}: ${e.message} (${e.expected || expectedColumns} colonnes attendues)`
+  //             ).join('\n');
+
+  //             throw new Error(
+  //               `Problème de format détecté:\n${errorDetails}\n\n` +
+  //               `Conseils:\n` +
+  //               `1. Vérifiez que toutes les lignes ont le même nombre de colonnes\n` +
+  //               `2. Encadrez les textes contenant des virgules/tabulations avec des guillemets\n` +
+  //               `3. Utilisez le modèle fourni comme référence`
+  //             );
+  //           }
+  //         }
+
+  //         if (!results.data || results.data.length === 0) {
+  //           throw new Error('Aucune donnée valide trouvée dans le fichier');
+  //         }
+
+  //         setImportStatus('Groupement des produits et variantes...');
+
+  //         // Group rows by product (using REFERENCE or PRODUCTNAME as key)
+  //         const productGroups = {};
+  //         results.data.forEach((row, index) => {
+  //           const productReference = (row.REFERENCE || '').toString().trim();
+  //           const productName = (row.PRODUCTNAME || '').toString().trim();
+
+  //           if (!productName) return; // Skip rows without product name
+
+  //           const groupKey = productReference || productName;
+  //           if (!productGroups[groupKey]) {
+  //             productGroups[groupKey] = [];
+  //           }
+  //           productGroups[groupKey].push({ ...row, rowNumber: index + 2 });
+  //         });
+
+  //         // Process each product group
+  //         const productsToImport = [];
+  //         Object.values(productGroups).forEach(productRows => {
+  //           if (productRows.length === 0) return;
+
+  //           const firstRow = productRows[0];
+  //           const isSimpleProduct = String(firstRow.SIMPLEPRODUCT || '').trim().toLowerCase() !== 'false';
+
+  //           try {
+  //             const parseNumber = (value, fieldName, required = false, defaultValue = 0) => {
+  //               if (value === null || value === undefined || value === '') {
+  //                 if (required) throw new Error(`Missing required field ${fieldName}`);
+  //                 return defaultValue;
+  //               }
+  //               const cleanedValue = String(value).replace(',', '.').trim();
+  //               const parsed = parseFloat(cleanedValue);
+  //               if (isNaN(parsed)) throw new Error(`Invalid ${fieldName}: ${value}`);
+  //               return parsed;
+  //             };
+
+  //             const prixHT = parseNumber(firstRow.SELLPRICETAXEXCLUDE, 'SELLPRICETAXEXCLUDE', true);
+  //             const taxe = parseNumber(firstRow.VAT, 'VAT', true);
+  //             const prixTTC = parseFloat((prixHT + (prixHT * taxe / 100)).toFixed(2));
+  //             const costPrice = parseNumber(firstRow.COSTPRICE, 'COSTPRICE', false);
+
+  //             const product = {
+  //               code: (firstRow.REFERENCE || '').toString().trim() || null,
+  //               designation: (firstRow.PRODUCTNAME || '').toString().trim(),
+  //               category_name: (firstRow.CATEGORY || 'Default').toString().trim(),
+  //               brand: (firstRow.BRAND || '').toString().trim() || null,
+  //               description: "",
+  //               cost_price: costPrice,
+  //               prix_ht: prixHT,
+  //               taxe: taxe,
+  //               prix_ttc: prixTTC,
+  //               stock: isSimpleProduct ? parseInt(firstRow.QUANTITY) || 0 : 0,
+  //               marge: parseNumber(firstRow.MARGE, 'MARGE', false, 0),
+  //               remise_max: parseNumber(firstRow.REMISE_MAX, 'REMISE_MAX', false),
+  //               remise_valeur_max: parseNumber(firstRow.REMISE_VALEUR_MAX, 'REMISE_VALEUR_MAX', false),
+  //               sellable: String(firstRow.SELLABLE || '').trim().toLowerCase() === 'true',
+  //               has_variants: !isSimpleProduct,
+  //               status: (firstRow.STATUS || 'in_stock').toString().trim(),
+  //               image_path: (firstRow.IMAGE || '').toString().trim() || null,
+  //               sub_category_name: (firstRow.SUB_CATEGORY || '').toString().trim() || null,
+  //               is_deleted: false,
+  //               date_expiration: firstRow.DATE_EXPIRE || null,
+  //               rowNumber: firstRow.rowNumber,
+  //               variants: []
+  //             };
+
+  //             if (!isSimpleProduct) {
+  //               product.variants = productRows.map(row => {
+  //                 const variantPriceImpact = parseNumber(row.IMPACTPRICE, 'IMPACTPRICE', true);
+  //                 const variantPrice = prixHT + variantPriceImpact;
+
+  //                 return {
+  //                   code: (row.VARIANTCODE || '').toString().trim() || null,
+  //                   combination_name: (row.VARIANTNAME || 'Default Variant').toString().trim(),
+  //                   price: variantPrice,
+  //                   price_impact: variantPriceImpact,
+  //                   stock: parseInt(row.QUANTITYVARIANT) || 0,
+  //                   default_variant: String(row.DEFAULTVARIANT || '').trim().toLowerCase() === 'true',
+  //                   attributes: parseAttributes(row.VARIANTNAME) || {},
+  //                   rowNumber: row.rowNumber
+  //                 };
+  //               });
+  //             }
+
+  //             productsToImport.push(product);
+  //           } catch (error) {
+  //             console.error(`Error processing product group: ${error.message}`);
+  //             importErrors.push({
+  //               rowNumber: firstRow.rowNumber,
+  //               productCode: firstRow.REFERENCE,
+  //               message: error.message
+  //             });
+  //           }
+  //         });
+
+  //         console.log('Products ready for import:', productsToImport);
+  //         setImportStatus(`Prêt à importer ${productsToImport.length} produits...`);
+  //         setImportedProducts(productsToImport);
+  //         simulateProgressThenImport(productsToImport);
+  //       },
+  //       error: (err) => {
+  //         throw new Error(`Erreur d'analyse: ${err.message}`);
+  //       }
+  //     });
+
+  //   } catch (error) {
+  //     console.error('Import error:', error);
+  //     setErrorMessage(error.message);
+  //     setImportStatus("Échec de l'importation");
+  //     setProgress(0);
+  //     showSnackbar(error.message, 'error');
+  //     setIsImporting(false);
+  //   }
+  // };
 
   const showSnackbar = (message, severity = 'success') => {
     setSnackbarMessage(message);
@@ -334,164 +558,192 @@ export default function Products() {
   };
 
   const parseAttributes = (variantName) => {
-    if (!variantName) return {};
-
-    const attributes = {};
-    const pairs = variantName.toString().split(',');
-    pairs.forEach(pair => {
-      const [key, val] = pair.split(':').map(s => s.trim());
-      if (key && val) {
-        attributes[key] = val;
-      }
+ if (!variantName) return {};
+    const attrs = {};
+    variantName.split(';').forEach(part => {
+      const [key, val] = part.split(':').map(s => s.trim());
+      if (key && val) attrs[key.toLowerCase()] = val;
     });
-    return attributes;
+    return attrs;
   };
 
   const simulateProgressThenImport = (productsToImport) => {
-    let progressValue = 0;
-    setProgress(0);
-
+      let prog = 0;
     const interval = setInterval(() => {
-      progressValue += 10;
-      if (progressValue >= 100) {
+      prog += 10;
+      setProgress(prog);
+      if (prog >= 100) {
         clearInterval(interval);
-        setProgress(100);
         sendProductsToBackend(productsToImport);
-      } else {
-        setProgress(progressValue);
       }
-    }, 150);
+    }, 100);
   };
-
-  const sendProductsToBackend = async (productsToImport) => {
+  const sendProductsToBackend = async (products) => {
     setImportStatus('Import en cours...');
-    setImportCount(0);
-    setImportedVariantsCount(0);
-    const errors = [];
-    const successfulImports = [];
-
     try {
-      for (let i = 0; i < productsToImport.length; i++) {
-        try {
-          const product = productsToImport[i];
+      const response = await fetch('http://localhost:8000/pos/product/add', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-TOKEN': csrfToken
+        },
+        body: JSON.stringify({ products })
+      });
 
-          // Skip if no reference or product name
-          if (!product.code && !product.designation) {
-            continue;
-          }
-
-          const productPayload = {
-            code: product.code,
-            designation: product.designation,
-            category_name: product.category_name,
-            brand: product.brand,
-            description: product.description,
-            cost_price: Number(product.cost_price) || 0,
-            prix_ht: Number(product.prix_ht),
-            taxe: Number(product.taxe),
-            prix_ttc: Number(product.prix_ttc) || 0,
-            stock: Number(product.stock) || 0,
-            marge: Number(product.marge) || 0,
-            remise_max: Number(product.remise_max) || 0,
-            remise_valeur_max: Number(product.remise_valeur_max) || 0,
-            sellable: product.sellable,
-            has_variants: product.has_variants,
-            status: product.status || 'in_stock',
-            image_path: product.image_path || null,
-            sub_category_name: product.sub_category_name || null,
-            is_deleted: product.is_deleted || false,
-            date_expiration: product.date_expiration || null,
-            variants: product.variants || []
-          };
-
-          console.log(`Sending product payload for ${product.code}:`, JSON.stringify(productPayload, null, 2));
-          const productRes = await fetch('http://127.0.0.1:8000/pos/product/add', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-CSRFToken': csrfToken,
-            },
-            credentials: 'include',
-            body: JSON.stringify(productPayload),
-          });
-          const responseText = await productRes.text();
-          console.log(`Response for ${product.code}:`, responseText);
-          if (!productRes.ok) {
-            throw new Error(`Erreur lors de la création du produit ${product.code}: ${responseText}`);
-          }
-
-
-          if (!productRes.ok) {
-            const errText = await productRes.text();
-            throw new Error(`Erreur lors de la création du produit ${product.code}: ${errText}`);
-          }
-
-          const productCreated = await productRes.json();
-          successfulImports.push({ ...product, backendId: productCreated.id || productCreated._id });
-          setImportCount((count) => count + 1);
-
-          // If this line has a variant, add it
-          if (product.has_variants && product.variant) {
-            const variantPayload = {
-              product_id: productCreated.id || productCreated._id,
-              combination_name: product.variant.combination_name,
-              price_impact: product.variant.price_impact,
-              stock: product.variant.stock,
-              default_variant: product.variant.default_variant,
-              attributes: product.variant.attributes,
-              price: product.variant.price,
-            };
-
-            const variantRes = await fetch(`http://127.0.0.1:8000/pos/product/${productCreated.id}/variant`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': csrfToken,
-              },
-              credentials: 'include',
-              body: JSON.stringify(variantPayload),
-            });
-
-            if (!variantRes.ok) {
-              const errText = await variantRes.text();
-              throw new Error(`Erreur lors de la création d'une variante pour ${product.code}: ${errText}`);
-            }
-
-            setImportedVariantsCount((count) => count + 1);
-          }
-        } catch (error) {
-          errors.push({
-            rowNumber: productsToImport[i].rowNumber,
-            productCode: productsToImport[i].code,
-            message: error.message
-          });
-          console.error(`Error importing row ${productsToImport[i].rowNumber}:`, error);
-        }
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Erreur serveur: ${errorText}`);
       }
 
-      setImportStatus('Import terminé avec succès!');
-      setImportErrors(errors);
-      setImportedProducts(successfulImports);
+      setImportStatus('Import terminé avec succès');
+      setImportedProducts(products);
       setShowImportSummary(true);
-
-      if (errors.length > 0) {
-        showSnackbar(`Import completed with ${errors.length} errors`, 'warning');
-      } else {
-        showSnackbar('Import terminé avec succès!', 'success');
-      }
-
-      // Refresh the product list after import
-      await fetchProducts();
-    } catch (error) {
-      console.error('Import error:', error);
-      setErrorMessage(error.message);
-      setImportStatus("Échec de l'importation");
-      showSnackbar(error.message, 'error');
+    } catch (err) {
+      setImportStatus('Erreur lors de l\'importation');
+      setErrorMessage(err.message);
     } finally {
       setIsImporting(false);
       setProgress(0);
     }
   };
+  // const sendProductsToBackend = async (productsToImport) => {
+  //   setImportStatus('Import en cours...');
+  //   setImportCount(0);
+  //   setImportedVariantsCount(0);
+  //   const errors = [];
+  //   const successfulImports = [];
+
+  //   try {
+  //     for (let i = 0; i < productsToImport.length; i++) {
+  //       const product = productsToImport[i];
+
+  //       try {
+  //         // Skip if no reference or product name
+  //         if (!product.code && !product.designation) {
+  //           continue;
+  //         }
+
+  //         const productPayload = {
+  //           code: product.code,
+  //           designation: product.designation,
+  //           category_name: product.category_name,
+  //           brand: product.brand,
+  //           description: product.description,
+  //           cost_price: Number(product.cost_price) || 0,
+  //           prix_ht: Number(product.prix_ht),
+  //           taxe: Number(product.taxe),
+  //           prix_ttc: Number(product.prix_ttc).toFixed(2),
+  //           stock: Number(product.stock) || 0,
+  //           marge: Number(product.marge) || 0,
+  //           remise_max: Number(product.remise_max) || 0,
+  //           remise_valeur_max: Number(product.remise_valeur_max) || 0,
+  //           sellable: product.sellable,
+  //           has_variants: product.has_variants,
+  //           status: product.status || 'in_stock',
+  //           image_path: product.image_path || null,
+  //           sub_category_name: product.sub_category_name || null,
+  //           is_deleted: product.is_deleted || false,
+  //           date_expiration: product.date_expiration || null,
+  //           variants: product.variants || []
+  //         };
+
+  //         console.log(`Sending product payload for ${product.code}:`, JSON.stringify(productPayload, null, 2));
+
+  //         // First create the product
+  //         const productRes = await fetch('http://127.0.0.1:8000/pos/product/add', {
+  //           method: 'POST',
+  //           headers: {
+  //             'Content-Type': 'application/json',
+  //             'X-CSRFToken': csrfToken,
+  //           },
+  //           credentials: 'include',
+  //           body: JSON.stringify(productPayload),
+  //         });
+
+  //         if (!productRes.ok) {
+  //           const errText = await productRes.text();
+  //           throw new Error(`Erreur lors de la création du produit ${product.code}: ${errText}`);
+  //         }
+
+  //         const productCreated = await productRes.json();
+  //         successfulImports.push({ ...product, backendId: productCreated.id || productCreated._id });
+  //         setImportCount(prev => prev + 1);
+
+  //         // Then create variants if this product has them
+  //         if (product.has_variants && product.variants.length > 0) {
+  //           let variantsCreated = 0;
+
+  //           for (const variant of product.variants) {
+  //             try {
+  //               const variantPayload = {
+  //                 product_id: productCreated.id || productCreated._id,
+  //                 combination_name: variant.combination_name,
+  //                 price_impact: variant.price_impact,
+  //                 stock: variant.stock,
+  //                 default_variant: variant.default_variant,
+  //                 attributes: variant.attributes,
+  //                 price: variant.price,
+  //               };
+
+  //               const variantRes = await fetch(`http://127.0.0.1:8000/pos/product/${productCreated.id}/variant`, {
+  //                 method: 'POST',
+  //                 headers: {
+  //                   'Content-Type': 'application/json',
+  //                   'X-CSRFToken': csrfToken,
+  //                 },
+  //                 credentials: 'include',
+  //                 body: JSON.stringify(variantPayload),
+  //               });
+
+  //               if (!variantRes.ok) {
+  //                 const errText = await variantRes.text();
+  //                 throw new Error(`Erreur lors de la création d'une variante pour ${product.code}: ${errText}`);
+  //               }
+
+  //               variantsCreated++;
+  //             } catch (variantError) {
+  //               errors.push({
+  //                 rowNumber: variant.rowNumber,
+  //                 productCode: product.code,
+  //                 message: `Variant error: ${variantError.message}`
+  //               });
+  //             }
+  //           }
+
+  //           setImportedVariantsCount(prev => prev + variantsCreated);
+  //         }
+  //       } catch (error) {
+  //         errors.push({
+  //           rowNumber: product.rowNumber,
+  //           productCode: product.code,
+  //           message: error.message
+  //         });
+  //         console.error(`Error importing row ${product.rowNumber}:`, error);
+  //       }
+  //     }
+
+  //     setImportStatus('Import terminé avec succès!');
+  //     setImportErrors(errors);
+  //     setImportedProducts(successfulImports);
+  //     setShowImportSummary(true);
+
+  //     if (errors.length > 0) {
+  //       showSnackbar(`Import completed with ${errors.length} errors`, 'warning');
+  //     } else {
+  //       showSnackbar('Import terminé avec succès!', 'success');
+  //     }
+
+  //     await fetchProducts();
+  //   } catch (error) {
+  //     console.error('Import error:', error);
+  //     setErrorMessage(error.message);
+  //     setImportStatus("Échec de l'importation");
+  //     showSnackbar(error.message, 'error');
+  //   } finally {
+  //     setIsImporting(false);
+  //     setProgress(0);
+  //   }
+  // };
 
   const handleViewVariants = (product) => {
     setCurrentProduct(product);

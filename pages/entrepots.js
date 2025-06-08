@@ -20,7 +20,6 @@ import {
 } from '@mui/material';
 import { ExpandMore, ExpandLess } from '@mui/icons-material';
 import * as XLSX from 'xlsx';
-import FileDownload from 'js-file-download';
 
 export default function Warehouses() {
   const [warehouses, setWarehouses] = useState([]);
@@ -31,6 +30,7 @@ export default function Warehouses() {
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [newWarehouseName, setNewWarehouseName] = useState('');
 
   const getCsrfToken = () => {
     return document.cookie
@@ -48,9 +48,6 @@ export default function Warehouses() {
           fetchWarehouses(),
         ]);
 
-        const productsArray = productsResponse.products || productsResponse;
-        await ensureProductsInWarehouses(productsArray, warehousesResponse);
-
         const updatedProducts = await fetchProducts();
         setAllProducts(updatedProducts.products || updatedProducts);
       } catch (error) {
@@ -59,9 +56,33 @@ export default function Warehouses() {
         setIsLoading(false);
       }
     };
-
     loadData();
   }, []);
+
+
+  const createWarehouse = async () => {
+    if (!newWarehouseName.trim()) return setError("Le nom de l'entrepôt est requis.");
+    setIsUpdating(true);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/pos/warehouse/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': getCsrfToken(),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ name: newWarehouseName }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await fetchWarehouses();
+      setNewWarehouseName('');
+      setError(null);
+    } catch (error) {
+      setError(`Erreur lors de l'ajout : ${error.message}`);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
 
   const fetchWarehouses = async () => {
     const res = await fetch('http://127.0.0.1:8000/pos/warehouse/', {
@@ -83,35 +104,7 @@ export default function Warehouses() {
       credentials: 'include',
     });
     if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    return data;
-  };
-
-  const ensureProductsInWarehouses = async (products, warehouses) => {
-    const promises = [];
-    for (const warehouse of warehouses) {
-      const stockByProductId = {};
-      warehouse.stock?.forEach(item => {
-        stockByProductId[item.product_id] = item;
-      });
-      for (const product of products) {
-        if (!stockByProductId[product.id]) {
-          promises.push(
-            fetch(`http://127.0.0.1:8000/pos/warehouse/${warehouse.id}/add-stock/`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCsrfToken(),
-              },
-              credentials: 'include',
-              body: JSON.stringify({ product_id: product.id, quantity: 0 }),
-            })
-          );
-        }
-      }
-    }
-    await Promise.all(promises);
-    await fetchWarehouses();
+    return res.json();
   };
 
   const toggleWarehouse = (id) => {
@@ -153,6 +146,27 @@ export default function Warehouses() {
     }
   };
 
+  const deleteWarehouse = async (id) => {
+    if (!window.confirm("Êtes-vous sûr de vouloir supprimer cet entrepôt ?")) return;
+    setIsUpdating(true);
+    try {
+      const res = await fetch(`http://localhost:8000/pos/warehouse/deletewarehouse/${id}/`, {
+        method: 'DELETE',
+        headers: {
+          'X-CSRFToken': getCsrfToken(),
+        },
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await fetchWarehouses();
+      setError(null);
+    } catch (error) {
+      setError(`Erreur lors de la suppression : ${error.message}`);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   const updateQuantity = async (warehouseId, productId, exists = true) => {
     const key = `${warehouseId}_${productId}`;
     const quantity = Number(editedQuantities[key]);
@@ -175,7 +189,11 @@ export default function Warehouses() {
       });
       if (!res.ok) throw new Error(await res.text());
       await fetchWarehouses();
-      setEditedQuantities(prev => { const newQ = { ...prev }; delete newQ[key]; return newQ; });
+      setEditedQuantities(prev => {
+        const newQ = { ...prev };
+        delete newQ[key];
+        return newQ;
+      });
     } catch (error) {
       setError(`Error updating quantity: ${error.message}`);
     } finally {
@@ -185,11 +203,9 @@ export default function Warehouses() {
 
   const distributeStock = async () => {
     const productsToDistribute = allProducts.products || allProducts;
-
-    if (!productsToDistribute || !productsToDistribute.length) {
+    if (!productsToDistribute?.length) {
       return setError('No products available for distribution');
     }
-
     setIsUpdating(true);
     try {
       for (const product of productsToDistribute) {
@@ -203,7 +219,7 @@ export default function Warehouses() {
               'X-CSRFToken': getCsrfToken(),
             },
             credentials: 'include',
-            body: JSON.stringify({ product_id: product.id, quantity }),
+            body: JSON.stringify({ product_id: product.id, quantity, variant_id: product.variants?.[0]?.id || null }),
           });
         }
       }
@@ -218,11 +234,9 @@ export default function Warehouses() {
 
   const exportWarehouseToExcel = (warehouse) => {
     const productsToExport = allProducts.products || allProducts;
-
     if (!productsToExport || !productsToExport.length) {
       return setError('No products available for export');
     }
-
     try {
       const data = warehouse.stock?.flatMap(stockItem => {
         const product = productsToExport.find(p => p.id === stockItem.product_id);
@@ -234,44 +248,39 @@ export default function Warehouses() {
             IMAGE: '',
             PRODUCTNAME: product.designation || '',
             REFERENCE: product.code || '',
-            CATEGORY: product.category?.name || '',
+            CATEGORY: product.category_name,
             BRAND: product.brand || '',
             DESCRIPTION: product.description || '',
             COSTPRICE: product.prix_ht || 0,
             SELLPRICETAXEXCLUDE: product.prix_ht || 0,
             VAT: product.taxe || 0,
-            SELLPRICETAXINCLUDE: product.prix_ttc * (1 + (product.taxe || 0) / 100),
-            QUANTITY: variant.stock || 0,
-            SELLABLE: product.sellable ? 'Oui' : 'Non',
-            SIMPLEPRODUCT: 'Non',
-            VARIANTNAME: variant.name || '',
-            DEFAULTVARIANT: variant.is_default ? 'Oui' : 'Non',
-            VARIANTIMAGE: '',
-            IMPACTPRICE: variant.impact_price || '',
-            QUANTITYVARIANT: variant.stock || '',
+            SELLPRICETAXINCLUDE: product.prix_ttc || 0,
+            QUANTITY: Math.round(variant.stock * (warehouse.percentage / 100)) || 0,
+            SELLABLE: product.sellable || false,
+            SIMPLEPRODUCT: !product.has_variants,
+            VARIANTNAME: variant.combination_name || '',
+            DEFAULTVARIANT: variant.default_variant || false,
+            VARIANTIMAGE: variant.image || '',
+            IMPACTPRICE: variant.price_impact || 0,
+            QUANTITYVARIANT: Math.round(variant.stock * (warehouse.percentage / 100)) || 0,
           }));
         }
 
         return [{
           ACTION: '',
-          IMAGE: '',
-          PRODUCTNAME: product.designation || '',
-          REFERENCE: product.code || '',
-          CATEGORY: product.category?.name || '',
-          BRAND: product.brand || '',
-          DESCRIPTION: product.description || '',
-          COSTPRICE: product.prix_ht || 0,
-          SELLPRICETAXEXCLUDE: product.prix_ht || 0,
-          VAT: product.taxe || 0,
-          SELLPRICETAXINCLUDE: product.prix_ttc * (1 + (product.taxe || 0) / 100),
-          QUANTITY: stockItem.quantity || 0,
-          SELLABLE: product.sellable ? 'Oui' : 'Non',
-          SIMPLEPRODUCT: 'Oui',
-          VARIANTNAME: '',
-          DEFAULTVARIANT: '',
-          VARIANTIMAGE: '',
-          IMPACTPRICE: '',
-          QUANTITYVARIANT: '',
+            IMAGE: '',
+            PRODUCTNAME: product.designation || '',
+            REFERENCE: product.code || '',
+            CATEGORY: product.category_name,
+            BRAND: product.brand || '',
+            DESCRIPTION: product.description || '',
+            COSTPRICE: product.prix_ht || 0,
+            SELLPRICETAXEXCLUDE: product.prix_ht || 0,
+            VAT: product.taxe || 0,
+            SELLPRICETAXINCLUDE: product.prix_ttc || 0,
+            QUANTITY: Math.round(product.stock * (warehouse.percentage / 100)) || 0,
+            SELLABLE: product.sellable || false,
+            SIMPLEPRODUCT: !product.has_variants,
         }];
       }) || [];
 
@@ -291,118 +300,166 @@ export default function Warehouses() {
   return (
     <Box sx={{ display: 'flex' }}>
       <Sidebar />
-      <Box sx={{ flex: 1 }}>
+      <Box sx={{ flexGrow: 1, p: 3 }}>
         <Header />
-        <Box component="main" sx={{ p: 3 }}>
-          <Typography variant="h4" gutterBottom>
-            Warehouse Management
-          </Typography>
+        <Typography variant="h4" gutterBottom>Entrepôts</Typography>
 
-          {error && (
-            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          )}
+        <Button
+          variant="contained"
+          color="primary"
+          onClick={distributeStock}
+          disabled={isUpdating || isLoading}
+          sx={{ mb: 2 }}
+        >
+          Distribuer le stock
+        </Button>
+        <Box display="flex" gap={2} mb={3}>
+          <TextField
+            label="Nouveau entrepôt"
+            value={newWarehouseName}
+            onChange={(e) => setNewWarehouseName(e.target.value)}
+          />
+          <Button
+            variant="contained"
+            color="success"
+            onClick={createWarehouse}
+            disabled={isUpdating}
+          >
+            Ajouter
+          </Button>
+        </Box>
 
-          {isLoading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-              <CircularProgress />
-            </Box>
-          ) : (
-            <>
-              <Box sx={{ display: 'flex', gap: 2, mb: 3 }}>
-                <Button
-                  variant="contained"
-                  onClick={distributeStock}
-                  disabled={isUpdating}
-                >
-                  {isUpdating ? 'Distributing...' : 'Distribute Stock'}
-                </Button>
+        {error && <Alert severity="error">{error}</Alert>}
+        {isLoading ? (
+          <CircularProgress />
+        ) : (
+          warehouses.map((warehouse) => (
+            <Box key={warehouse.id} mb={4}>
+              <Box display="flex" alignItems="center" justifyContent="space-between">
+                <Typography variant="h6">{warehouse.name}</Typography>
+                <IconButton onClick={() => toggleWarehouse(warehouse.id)}>
+                  {expandedWarehouseId === warehouse.id ? <ExpandLess /> : <ExpandMore />}
+                </IconButton>
               </Box>
+              <Collapse in={expandedWarehouseId === warehouse.id}>
+                <Box mb={2}>
+                  <TextField
+                    label="Pourcentage"
+                    value={editedPercentages[warehouse.id]}
+                    onChange={(e) => handlePercentageChange(warehouse.id, e.target.value)}
+                    sx={{ mt: 1, mr: 1, width: '120px' }}
+                  />
+                  <Button onClick={() => updatePercentage(warehouse.id)}>Enregistrer %</Button>
+                  <Button
+                    onClick={() => exportWarehouseToExcel(warehouse)}
+                    sx={{ ml: 2 }}
+                  >
+                    Exporter vers Excel
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    onClick={() => deleteWarehouse(warehouse.id)}
+                    sx={{ ml: 2 }}
+                  >
+                    Supprimer
+                  </Button>
+                </Box>
+                <TableContainer component={Paper}>
+                  <Table>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Produit</TableCell>
+                        <TableCell>Quantité</TableCell>
+                        <TableCell>Nouvelle Quantité</TableCell>
+                        <TableCell>Action</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {warehouse.stock?.flatMap((item) => {
+                        const product = allProducts.find(p => p.id === item.product_id);
+                        if (!product) {
+                          // Produit non trouvé, afficher une ligne simple
+                          const key = `${warehouse.id}_${item.product_id}_unknown`;
+                          return (
+                            <TableRow key={key}>
+                              <TableCell>Produit inconnu</TableCell>
+                              <TableCell>{item.quantity}</TableCell>
+                              <TableCell></TableCell>
+                              <TableCell></TableCell>
+                            </TableRow>
+                          );
+                        }
 
-              {warehouses.map(warehouse => (
-                <Paper key={warehouse.id} sx={{ mt: 2, p: 2 }}>
-                  <Box display="flex" justifyContent="space-between" alignItems="center">
-                    <Typography variant="h6">{warehouse.name}</Typography>
-                    <Box display="flex" alignItems="center">
-                      <TextField
-                        label="Percentage"
-                        type="number"
-                        value={editedPercentages[warehouse.id] ?? warehouse.percentage ?? 0}
-                        onChange={(e) => handlePercentageChange(warehouse.id, e.target.value)}
-                        sx={{ width: 100, mr: 1 }}
-                        inputProps={{ min: 0, max: 100 }}
-                      />
-                      <Button
-                        onClick={() => updatePercentage(warehouse.id)}
-                        disabled={isUpdating}
-                        sx={{ mr: 1 }}
-                      >
-                        Update
-                      </Button>
-                      <Button
-                        variant="contained"
-                        color="secondary"
-                        onClick={() => exportWarehouseToExcel(warehouse)}
-                        disabled={isUpdating}
-                        sx={{ mr: 1 }}
-                      >
-                        Export Stock
-                      </Button>
-                      <IconButton onClick={() => toggleWarehouse(warehouse.id)}>
-                        {expandedWarehouseId === warehouse.id ? <ExpandLess /> : <ExpandMore />}
-                      </IconButton>
-                    </Box>
-                  </Box>
+                        if (product.has_variants && product.variants?.length) {
+                          // Produit avec variantes : une ligne par variante
+                          return product.variants.map((variant) => {
+                            const variantStock = Math.round(variant.stock * (warehouse.percentage / 100));
+                            const key = `${warehouse.id}_${product.id}_${variant.id}`;
+                            const quantityKey = `${warehouse.id}_${product.id}_${variant.id}`;
 
-                  <Collapse in={expandedWarehouseId === warehouse.id}>
-                    <TableContainer>
-                      <Table>
-                        <TableHead>
-                          <TableRow>
-                            <TableCell>Product Name</TableCell>
-                            <TableCell>Quantity</TableCell>
-                            <TableCell>New Quantity</TableCell>
-                            <TableCell>Action</TableCell>
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {warehouse.stock?.map(stockItem => {
-                            const product = (allProducts.products || allProducts).find(p => p.id === stockItem.product_id);
-                            if (!product) return null;
-                            const key = `${warehouse.id}_${product.id}`;
                             return (
                               <TableRow key={key}>
-                                <TableCell>{product.designation}</TableCell>
-                                <TableCell>{stockItem.quantity}</TableCell>
+                                <TableCell>{`${product.designation} - ${variant.combination_name}`}</TableCell>
+                                <TableCell>{variantStock}</TableCell>
                                 <TableCell>
                                   <TextField
+                                    value={editedQuantities[quantityKey] ?? ''}
+                                    onChange={(e) =>
+                                      handleQuantityChange(warehouse.id, product.id, e.target.value, variant.id)
+                                    }
+                                    size="small"
                                     type="number"
-                                    value={editedQuantities[key] ?? ''}
-                                    onChange={(e) => handleQuantityChange(warehouse.id, product.id, e.target.value)}
-                                    inputProps={{ min: 0 }}
                                   />
                                 </TableCell>
                                 <TableCell>
                                   <Button
-                                    onClick={() => updateQuantity(warehouse.id, product.id)}
-                                    disabled={isUpdating || editedQuantities[key] === undefined}
+                                    variant="contained"
+                                    onClick={() => updateQuantity(warehouse.id, product.id, variant.id)}
                                   >
-                                    Update
+                                    Mettre à jour
                                   </Button>
                                 </TableCell>
                               </TableRow>
                             );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </TableContainer>
-                  </Collapse>
-                </Paper>
-              ))}
-            </>
-          )}
-        </Box>
+                          });
+                        }
+
+                        // Produit sans variantes : afficher une ligne simple
+                        const key = `${warehouse.id}_${product.id}_noVariant`;
+                        return (
+                          <TableRow key={key}>
+                            <TableCell>{product.designation}</TableCell>
+                            <TableCell>{item.quantity}</TableCell>
+                            <TableCell>
+                              <TextField
+                                value={editedQuantities[key] ?? ''}
+                                onChange={(e) =>
+                                  handleQuantityChange(warehouse.id, product.id, e.target.value, null)
+                                }
+                                size="small"
+                                type="number"
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                variant="contained"
+                                onClick={() => updateQuantity(warehouse.id, product.id, null)}
+                              >
+                                Mettre à jour
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+
+                  </Table>
+                </TableContainer>
+              </Collapse>
+            </Box>
+          ))
+        )}
       </Box>
     </Box>
   );
